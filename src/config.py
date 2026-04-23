@@ -24,20 +24,21 @@ SUB_FILE    = os.path.join(DATA_DIR, "sample_submission.csv")
 LGB_PARAMS = {
     "objective":         "binary",
     "metric":            "auc",
-    "learning_rate":     0.05,
-    "num_leaves":        127,
-    "min_child_samples": 50,
-    "feature_fraction":  0.8,
-    "bagging_fraction":  0.8,
-    "bagging_freq":      5,
-    "reg_alpha":         0.1,
-    "reg_lambda":        0.1,
+    "learning_rate":     0.01769,
+    "num_leaves":        35,
+    "max_depth":         8,
+    "min_child_samples": 88,
+    "feature_fraction":  0.5753,
+    "bagging_fraction":  0.6406,
+    "bagging_freq":      2,
+    "reg_alpha":         0.04619,
+    "reg_lambda":        0.00066,
     "n_jobs":            -1,
     "verbose":           -1,
     "random_state":      SEED,
 }
 
-LGB_NUM_BOOST  = 2000
+LGB_NUM_BOOST  = 3000
 LGB_EARLY_STOP = 50
 
 # ── 범주형 컬럼 ─────────────────────────────────────────────
