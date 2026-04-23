@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import StratifiedKFold
 import os
 import sys
 
@@ -8,8 +9,19 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from config import (
     TRAIN_FILE, TEST_FILE, SUB_FILE, OUTPUT_DIR,
-    CAT_COLS, BIN_COLS, COUNT_COLS, COUNT_MAP, NUM_COLS,
+    CAT_COLS, BIN_COLS, COUNT_COLS, COUNT_MAP, NUM_COLS, SEED, N_SPLITS,
 )
+
+# ── 타겟 인코딩 적용할 컬럼 ─────────────────────────────────
+TARGET_ENC_COLS = [
+    "시술 시기 코드",
+    "시술 당시 나이",
+    "시술 유형",
+    "특정 시술 유형",
+    "배란 유도 유형",
+    "난자 출처",
+    "정자 출처",
+]
 
 
 def load_data():
@@ -65,8 +77,7 @@ def fill_missing(train, test):
 
 def encode_cat_cols(train, test):
     """
-    범주형 인코딩 — 대회 규칙 준수
-    train + test 합쳐서 fit → 각각 transform
+    범주형 라벨 인코딩 — train+test 합쳐서 fit
     """
     all_data = pd.concat([train, test], axis=0, ignore_index=True)
     encoders = {}
@@ -83,14 +94,65 @@ def encode_cat_cols(train, test):
     return train, test, encoders
 
 
+def target_encoding(train, test, target):
+    """
+    타겟 인코딩 — CV 방식으로 leakage 방지
+    train: K-Fold OOF 방식으로 인코딩
+    test: train 전체 평균으로 인코딩
+    """
+    train = train.copy()
+    test  = test.copy()
+    skf   = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=SEED)
+
+    for col in TARGET_ENC_COLS:
+        if col not in train.columns:
+            continue
+
+        # train: OOF 방식
+        train[f"{col}_te"] = 0.0
+        for tr_idx, val_idx in skf.split(train, target):
+            mean_map = train.iloc[tr_idx].groupby(col)["__target__"].mean() \
+                if "__target__" in train.columns \
+                else pd.Series(target[tr_idx], index=tr_idx) \
+                    .groupby(train.iloc[tr_idx][col].values).mean()
+
+            # fold별 평균 계산
+            fold_map = {}
+            for idx in tr_idx:
+                key = train.iloc[idx][col]
+                if key not in fold_map:
+                    fold_map[key] = []
+                fold_map[key].append(target[idx])
+            fold_mean = {k: np.mean(v) for k, v in fold_map.items()}
+
+            global_mean = target[tr_idx].mean()
+            train.loc[train.index[val_idx], f"{col}_te"] = \
+                train.iloc[val_idx][col].map(fold_mean).fillna(global_mean)
+
+        # test: train 전체 평균
+        global_mean = target.mean()
+        full_map = {}
+        for idx in range(len(train)):
+            key = train.iloc[idx][col]
+            if key not in full_map:
+                full_map[key] = []
+            full_map[key].append(target[idx])
+        full_mean = {k: np.mean(v) for k, v in full_map.items()}
+        test[f"{col}_te"] = test[col].map(full_mean).fillna(global_mean)
+
+        print(f"  타겟 인코딩 완료: {col}_te")
+
+    return train, test
+
+
 def feature_engineering(df):
-    """피처 엔지니어링 — train/test 각각 호출"""
+    """기본 피처 엔지니어링"""
 
     # 불임 원인 총 개수
     infertility_cols = [c for c in df.columns if "불임 원인" in c]
     df["불임원인_총개수"] = df[infertility_cols].sum(axis=1)
 
-    # 배아 활용률 (이식 / 생성)
+    # 배아 활용률
     df["배아_활용률"] = df["이식된 배아 수"] / (df["총 생성 배아 수"] + 1)
 
     # 미세주입 이식 비율
@@ -101,6 +163,12 @@ def feature_engineering(df):
 
     # 시술 대비 임신 비율
     df["임신_시술_비율"] = df["총 임신 횟수"] / (df["총 시술 횟수"] + 1)
+
+    # 반복 실패 횟수
+    df["실패_횟수"] = df["총 시술 횟수"] - df["총 임신 횟수"]
+
+    # 첫 시술 여부
+    df["첫_시술_여부"] = (df["총 시술 횟수"] == 0).astype(int)
 
     return df
 
@@ -126,15 +194,18 @@ def preprocess(save=True):
     # 5. 범주형 인코딩 (합쳐서 fit)
     train, test, encoders = encode_cat_cols(train, test)
 
-    # 6. 피처 엔지니어링
+    # 6. 타겟 인코딩 (OOF 방식)
+    print("타겟 인코딩 중...")
+    train, test = target_encoding(train, test, target)
+
+    # 7. 피처 엔지니어링
     train = feature_engineering(train)
     test  = feature_engineering(test)
 
-    print(f"전처리 완료 → Train: {train.shape} | Test: {test.shape}")
-    print(f"피처 목록 ({len(train.columns)}개):")
-    print(train.columns.tolist())
+    print(f"\n전처리 완료 → Train: {train.shape} | Test: {test.shape}")
+    print(f"피처 수: {len(train.columns)}개")
 
-    # 7. 저장
+    # 8. 저장
     if save:
         train.to_csv(os.path.join(OUTPUT_DIR, "train_processed.csv"), index=False)
         test.to_csv(os.path.join(OUTPUT_DIR,  "test_processed.csv"),  index=False)
