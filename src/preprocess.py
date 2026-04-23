@@ -10,7 +10,7 @@ from config import (
     CAT_COLS, BIN_COLS, COUNT_COLS, COUNT_MAP, NUM_COLS,
 )
 
-# 결측 여부를 피처로 만들 컬럼 (결측 자체가 의미있는 정보)
+# 결측 여부를 피처로 만들 컬럼
 MISSING_INDICATOR_COLS = [
     "난자 해동 경과일",
     "배아 해동 경과일",
@@ -23,6 +23,17 @@ MISSING_INDICATOR_COLS = [
     "난자 혼합 경과일",
     "배아 이식 경과일",
 ]
+
+# 나이 수치 매핑
+AGE_MAP = {
+    "만18-34세": 26,
+    "만35-37세": 36,
+    "만38-39세": 38,
+    "만40-42세": 41,
+    "만43-44세": 43,
+    "만45-50세": 47,
+    "알 수 없음": -1,
+}
 
 
 def load_data():
@@ -38,6 +49,27 @@ def add_missing_indicators(df):
     for col in MISSING_INDICATOR_COLS:
         if col in df.columns:
             df[f"{col}_결측"] = df[col].isna().astype(int)
+    return df
+
+
+def extract_age_features(df):
+    """나이 수치화 — 인코딩 전 원본 컬럼에서 실행"""
+    if "시술 당시 나이" in df.columns:
+        df["나이_수치"] = df["시술 당시 나이"].map(AGE_MAP).fillna(-1)
+        df["고령_여부"]     = (df["나이_수치"] >= 38).astype(int)
+        df["초고령_여부"]   = (df["나이_수치"] >= 43).astype(int)
+        df["최적나이_여부"] = (df["나이_수치"] < 35).astype(int)
+    return df
+
+
+def extract_treatment_type_features(df):
+    """인코딩 전 실행 — 시술 유형 텍스트에서 피처 추출"""
+    col = "특정 시술 유형"
+    df["배반포_여부"]   = df[col].astype(str).str.contains("BLASTOCYST", na=False).astype(int)
+    df["FER_여부"]      = df[col].astype(str).str.contains("FER", na=False).astype(int)
+    df["ICSI_여부"]     = df[col].astype(str).str.contains("ICSI", na=False).astype(int)
+    df["IVF_여부"]      = df[col].astype(str).str.contains("IVF", na=False).astype(int)
+    df["복합시술_여부"] = df[col].astype(str).str.contains(r"[/:]", na=False).astype(int)
     return df
 
 
@@ -92,17 +124,6 @@ def encode_cat_cols(train, test):
     return train, test, encoders
 
 
-def extract_treatment_type_features(df):
-    """인코딩 전 실행 — 시술 유형 텍스트에서 피처 추출"""
-    col = "특정 시술 유형"
-    df["배반포_여부"]   = df[col].astype(str).str.contains("BLASTOCYST", na=False).astype(int)
-    df["FER_여부"]      = df[col].astype(str).str.contains("FER", na=False).astype(int)
-    df["ICSI_여부"]     = df[col].astype(str).str.contains("ICSI", na=False).astype(int)
-    df["IVF_여부"]      = df[col].astype(str).str.contains("IVF", na=False).astype(int)
-    df["복합시술_여부"] = df[col].astype(str).str.contains(r"[/:]", na=False).astype(int)
-    return df
-
-
 def feature_engineering(df):
     """피처 엔지니어링"""
 
@@ -131,6 +152,11 @@ def feature_engineering(df):
     # 출산 이력 여부
     df["출산이력_여부"]     = (df["총 출산 횟수"] > 0).astype(int)
 
+    # 나이 × 시술 횟수 교호작용
+    if "나이_수치" in df.columns:
+        df["나이x시술횟수"] = df["나이_수치"] * df["총 시술 횟수"]
+        df["나이x임신성공률"] = df["나이_수치"] * df["임신_시술_비율"]
+
     return df
 
 
@@ -149,21 +175,25 @@ def preprocess(save=True):
     train = add_missing_indicators(train)
     test  = add_missing_indicators(test)
 
-    # 4. 인코딩 전 시술 유형 피처 추출
+    # 4. 나이 수치화 (인코딩 전에!)
+    train = extract_age_features(train)
+    test  = extract_age_features(test)
+
+    # 5. 인코딩 전 시술 유형 피처 추출
     train = extract_treatment_type_features(train)
     test  = extract_treatment_type_features(test)
 
-    # 5. 횟수형 매핑
+    # 6. 횟수형 매핑
     train = map_count_cols(train)
     test  = map_count_cols(test)
 
-    # 6. 결측치 처리 (각각)
+    # 7. 결측치 처리 (각각)
     train, test = fill_missing(train, test)
 
-    # 7. 범주형 인코딩 (합쳐서 fit)
+    # 8. 범주형 인코딩 (합쳐서 fit)
     train, test, encoders = encode_cat_cols(train, test)
 
-    # 8. 피처 엔지니어링
+    # 9. 피처 엔지니어링
     train = feature_engineering(train)
     test  = feature_engineering(test)
 

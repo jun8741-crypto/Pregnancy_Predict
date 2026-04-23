@@ -209,4 +209,13 @@ def feature_engineering(df):
     df["ICSI_여부"] = df["특정 시술 유형"].astype(str).str.contains(
         "ICSI", na=False).astype(int)
 
+
+# 나이 × 배반포 조합 (고령이어도 배반포면 성공률 높음)
+    if "나이_수치" in df.columns and "배반포_여부" in df.columns:
+        df["고령_배반포"]   = df["고령_여부"] * df["배반포_여부"]
+        df["최적나이_배반포"] = df["최적나이_여부"] * df["배반포_여부"]
+        df["나이x배반포"]   = df["나이_수치"] * df["배반포_여부"]
+
+
+
     return df
