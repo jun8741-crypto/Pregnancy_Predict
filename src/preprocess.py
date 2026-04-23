@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import StratifiedKFold
 import os
 import sys
 
@@ -8,6 +9,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from config import (
     TRAIN_FILE, TEST_FILE, SUB_FILE, OUTPUT_DIR,
     CAT_COLS, BIN_COLS, COUNT_COLS, COUNT_MAP, NUM_COLS,
+    SEED, N_SPLITS,
 )
 
 # 결측 여부를 피처로 만들 컬럼
@@ -33,6 +35,16 @@ AGE_MAP = {
     "만43-44세": 43,
     "만45-50세": 47,
     "알 수 없음": -1,
+}
+
+DONOR_AGE_MAP = {
+    "만20세 이하": 19,
+    "만21-25세":   23,
+    "만26-30세":   28,
+    "만31-35세":   33,
+    "만36-40세":   38,
+    "만41-45세":   43,
+    "알 수 없음":  -1,
 }
 
 
@@ -71,6 +83,44 @@ def extract_treatment_type_features(df):
     df["IVF_여부"]      = df[col].astype(str).str.contains("IVF", na=False).astype(int)
     df["복합시술_여부"] = df[col].astype(str).str.contains(r"[/:]", na=False).astype(int)
     return df
+
+
+def add_donor_age_features(df):
+    """기증자 나이 수치화 — 인코딩 전 원본 컬럼에서 실행"""
+    if "난자 기증자 나이" in df.columns:
+        df["난자기증자_나이_수치"] = df["난자 기증자 나이"].map(DONOR_AGE_MAP).fillna(-1)
+    if "정자 기증자 나이" in df.columns:
+        df["정자기증자_나이_수치"] = df["정자 기증자 나이"].map(DONOR_AGE_MAP).fillna(-1)
+    # 환자 vs 난자 기증자 나이 차 (기증 난자 사용 케이스에서 유효)
+    if "난자기증자_나이_수치" in df.columns and "나이_수치" in df.columns:
+        valid = (df["난자기증자_나이_수치"] != -1) & (df["나이_수치"] != -1)
+        df["환자_기증자_나이차"] = np.where(
+            valid, df["나이_수치"] - df["난자기증자_나이_수치"], -1
+        )
+    return df
+
+
+def add_clinic_target_encoding(train, test, target):
+    """시술 시기 코드 OOF target encoding — 데이터 누수 없이 클리닉 성공률 반영"""
+    col        = "시술 시기 코드"
+    new_col    = "클리닉_성공률_TE"
+    global_mean = float(np.mean(target))
+
+    train = train.reset_index(drop=True)
+    oof_te = np.full(len(train), global_mean)
+
+    skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=SEED)
+    for tr_idx, val_idx in skf.split(train, target):
+        fold_df   = pd.DataFrame({"code": train[col].iloc[tr_idx].values, "target": target[tr_idx]})
+        fold_mean = fold_df.groupby("code")["target"].mean()
+        oof_te[val_idx] = train[col].iloc[val_idx].map(fold_mean).fillna(global_mean).values
+
+    train[new_col] = oof_te
+
+    clinic_mean    = pd.DataFrame({"code": train[col].values, "target": target}).groupby("code")["target"].mean()
+    test[new_col]  = test[col].map(clinic_mean).fillna(global_mean)
+
+    return train, test
 
 
 def map_count_cols(df):
@@ -154,8 +204,22 @@ def feature_engineering(df):
 
     # 나이 × 시술 횟수 교호작용
     if "나이_수치" in df.columns:
-        df["나이x시술횟수"] = df["나이_수치"] * df["총 시술 횟수"]
+        df["나이x시술횟수"]   = df["나이_수치"] * df["총 시술 횟수"]
         df["나이x임신성공률"] = df["나이_수치"] * df["임신_시술_비율"]
+
+    # ICSI 배아 생성 효율 (미세주입 성공률)
+    df["ICSI_배아생성효율"] = df["미세주입에서 생성된 배아 수"] / (df["미세주입된 난자 수"] + 1)
+
+    # 전체 수정 성공률 (난자 → 배아 전환율)
+    df["수정성공률"] = df["총 생성 배아 수"] / (df["혼합된 난자 수"] + 1)
+
+    # 동결 배아 해동 성공률
+    df["해동성공률"] = df["해동된 배아 수"] / (df["저장된 배아 수"] + 1)
+
+    # 나이 × 배반포 교호작용
+    if "배반포_여부" in df.columns and "나이_수치" in df.columns:
+        df["고령_배반포"]     = df["고령_여부"] * df["배반포_여부"]
+        df["나이x배반포"]     = df["나이_수치"] * df["배반포_여부"]
 
     return df
 
@@ -183,17 +247,24 @@ def preprocess(save=True):
     train = extract_treatment_type_features(train)
     test  = extract_treatment_type_features(test)
 
-    # 6. 횟수형 매핑
+    # 6. 기증자 나이 수치화 (인코딩 전)
+    train = add_donor_age_features(train)
+    test  = add_donor_age_features(test)
+
+    # 7. 횟수형 매핑
     train = map_count_cols(train)
     test  = map_count_cols(test)
 
-    # 7. 결측치 처리 (각각)
+    # 8. 결측치 처리 (각각)
     train, test = fill_missing(train, test)
 
-    # 8. 범주형 인코딩 (합쳐서 fit)
+    # 9. 클리닉 OOF target encoding (label encoding 전)
+    train, test = add_clinic_target_encoding(train, test, target)
+
+    # 10. 범주형 인코딩 (합쳐서 fit)
     train, test, encoders = encode_cat_cols(train, test)
 
-    # 9. 피처 엔지니어링
+    # 11. 피처 엔지니어링
     train = feature_engineering(train)
     test  = feature_engineering(test)
 
