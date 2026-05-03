@@ -38,6 +38,7 @@ catboost_info/
 *.bak_*
 
 *.md
+!README.md
 *.ipynb
 .ipynb_checkpoints/
 
